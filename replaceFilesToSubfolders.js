@@ -1,107 +1,127 @@
-const fs = require('fs');
-const path = require('path');
-const { promisify } = require('util');
-const mkdirp = promisify(require('mkdirp'));
+const fs = require("fs");
+const path = require("path");
+const mkdirp = require("mkdirp");
+const ProgressBar = require("progress");
 
-function moveFilesToSubfolders(folderPath, subfolderPath, subfolderName, numSubfolders, numFilesPerSubfolder) {
+function moveFilesToSubfolders(
+  folderPath,
+  subfolderPath,
+  subfolderName,
+  numSubfolders,
+  numFilesPerSubfolder
+) {
+  // Validate input
+  if (numSubfolders === 0 && numFilesPerSubfolder === 0) {
+    throw new Error(
+      "Please specify either numSubfolders or numFilesPerSubfolder!"
+    );
+  }
+  if (numSubfolders > 0 && numFilesPerSubfolder > 0) {
+    throw new Error(
+      "Please specify either numSubfolders or numFilesPerSubfolder, not both!"
+    );
+  }
+
   // Create subfolders
   let numFiles = 0;
   let numFolders = 0;
 
-  // Validate input
-  if (numSubfolders === 0 && numFilesPerSubfolder === 0) {
-    throw new Error('Please specify either numSubfolders or numFilesPerSubfolder');
-  }
-  if (numSubfolders > 0 && numFilesPerSubfolder > 0) {
-    throw new Error('Please specify either numSubfolders or numFilesPerSubfolder, not both');
-  }
-  
+  fs.readdir(folderPath, (err, filenames) => {
+    if (err) throw err;
 
-  if (numFilesPerSubfolder === 0) {
-    // Calculate number of subfolders needed to distribute files evenly
-    fs.readdir(folderPath, (err, filenames) => {
-      if (err) throw err;
-      numFiles = filenames.length;
-      numFolders = Math.ceil(numFiles / numSubfolders);
-      for (let i = 0; i < numFolders; i++) {
-        const folderName = `${subfolderName}-${i}`;
-        const folderFullPath = path.join(subfolderPath, folderName);
-        mkdirp(folderFullPath, {});
-      }
-
-      // Change permissions of subfolderPath to 777 (write, read, execute)
-      setFullPremissionsToSubfolders(subfolderPath);
-      distributeFilesPerSubfoldersEvenly(folderPath, subfolderPath, subfolderName, numFolders);
-    });
-  } else if (numSubfolders === 0) {
-    // Calculate number of files per subfolder and create subfolders dynamically
-    fs.readdir(folderPath, (err, filenames) => {
-      if (err) throw err;
-      numFiles = filenames.length;
+    numFiles = filenames.length;
+    if (numFilesPerSubfolder === 0) {
+      numFolders = numSubfolders;
+      // Calculate number of files per subfolder to distribute files evenly
+      numFilesPerSubfolder = Math.ceil(numFiles / numFolders);
+    } else {
       numFolders = Math.ceil(numFiles / numFilesPerSubfolder);
-      for (let i = 0; i < numFolders; i++) {
-        const folderName = `${subfolderName}-${i}`;
-        const folderFullPath = path.join(subfolderPath, folderName);
-        mkdirp(folderFullPath, {});
-      }
-      // Change permissions of subfolderPath to 777 (write, read, execute)
-      setFullPremissionsToSubfolders(subfolderPath);
-      distributeFilesWithNumFilesPerSubfolder(folderPath, subfolderPath, subfolderName, numFolders, numFilesPerSubfolder);
+    }
+
+    console.log(`File replacement instructions: new folder structure will have ${numFilesPerSubfolder} files per ${numFolders} subfolders.`, '\n')
+
+    // Add progress bar for creating subfolders
+    console.log(`Creating ${numFolders} subfolders, for total ${numFiles} files.`);
+    const createFoldersBar = new ProgressBar("[:bar] :percent :etas", {
+      complete: "=",
+      incomplete: " ",
+      width: 50,
+      total: numFolders,
     });
-  }
+
+    const subfolderPromises = []; // array of promises for created subfolders
+    for (let i = 0; i < numFolders; i++) {
+      const folderName = `${subfolderName}-${i}`;
+      const folderFullPath = path.join(subfolderPath, folderName);
+      subfolderPromises.push(mkdirp(folderFullPath, {}));
+      createFoldersBar.tick();
+    }
+
+    // Wait for all subfolders to be created
+    Promise.all(subfolderPromises)
+      .then(() => {
+        console.log("All subfolders created.");
+        // Change permissions of subfolderPath to 777 (write, read, execute)
+        setFullPremissionsToSubfolders(subfolderPath);
+        distributeFiles(folderPath, subfolderPath, subfolderName, numFilesPerSubfolder);
+      })
+      .catch((err) => {
+        console.error(err);
+      });
+  });
 }
 
-function distributeFilesPerSubfoldersEvenly(folderPath, subfolderPath, subfolderName, numFolders) {
+function distributeFiles(
+  folderPath,
+  subfolderPath,
+  subfolderName,
+  numFilesPerSubfolder = 0
+) {
   const chunkSize = 1024 * 1024; // 1MB
   fs.readdir(folderPath, (err, filenames) => {
     if (err) throw err;
     const totalFiles = filenames.length;
     let filesMoved = 0;
-    filenames.forEach((filename, i) => {
-      const folderNum = Math.floor(i / numFolders);
-      const folderName = `${subfolderName}-${folderNum}`;
-      const folderFullPath = path.join(subfolderPath, folderName);
-      const fileSrcPath = path.join(folderPath, filename);
-      const fileDestPath = path.join(folderFullPath, filename);
-      const readStream = fs.createReadStream(fileSrcPath, { highWaterMark: chunkSize });
-      const writeStream = fs.createWriteStream(fileDestPath);
-      readStream.pipe(writeStream);
-      readStream.on('end', () => {
-        fs.unlink(fileSrcPath, (err) => {
-          if (err) throw err;
-          filesMoved++;
-          console.log(`Moved file ${filename} to ${folderFullPath} (${filesMoved}/${totalFiles})`);
-        });
-      });
-    });
-  });
-}
-
-function distributeFilesWithNumFilesPerSubfolder(folderPath, subfolderPath, subfolderName, numFolders, numFilesPerSubfolder) {
-  const chunkSize = 1024 * 1024; // 1MB
-  fs.readdir(folderPath, (err, filenames) => {
-    if (err) throw err;
-    const totalFiles = filenames.length;
     let folderNum = 0;
     let fileCount = 0;
-    let folderFullPath = path.join(subfolderPath, `${subfolderName}-${folderNum}`);
-    mkdirp(folderFullPath, {});
+    let destFolderFullPath = path.join(
+      subfolderPath,
+      `${subfolderName}-${folderNum}`
+    );
+    const bar = new ProgressBar("[:bar] :percent :etas", {
+      complete: "=",
+      incomplete: " ",
+      width: 50,
+      total: totalFiles,
+      callback: () => {
+        console.log(`Completed. Moved ${filesMoved} of ${totalFiles} files.`, '\n');
+        console.log(`Files are now located in ${subfolderPath}.`);
+      }
+    });
+
+    // Move files to subfolders
+    console.log(`Starting to move ${totalFiles} files to subfolders.`);
     filenames.forEach((filename, i) => {
       if (fileCount >= numFilesPerSubfolder) {
         folderNum++;
-        folderFullPath = path.join(subfolderPath, `${subfolderName}-${folderNum}`);
-        mkdirp(folderFullPath, {});
+        destFolderFullPath = path.join(
+          subfolderPath,
+          `${subfolderName}-${folderNum}`
+        );
         fileCount = 0;
       }
       const fileSrcPath = path.join(folderPath, filename);
-      const fileDestPath = path.join(folderFullPath, filename);
-      const readStream = fs.createReadStream(fileSrcPath, { highWaterMark: chunkSize });
+      const fileDestPath = path.join(destFolderFullPath, filename);
+      const readStream = fs.createReadStream(fileSrcPath, {
+        highWaterMark: chunkSize,
+      });
       const writeStream = fs.createWriteStream(fileDestPath);
       readStream.pipe(writeStream);
-      readStream.on('end', () => {
+      readStream.on("end", () => {
         fs.unlink(fileSrcPath, (err) => {
           if (err) throw err;
-          console.log(`Moved file ${filename} to ${folderFullPath} (${i + 1}/${totalFiles})`);
+          filesMoved++;
+          bar.tick();
         });
       });
       fileCount++;
@@ -112,14 +132,17 @@ function distributeFilesWithNumFilesPerSubfolder(folderPath, subfolderPath, subf
 function setFullPremissionsToSubfolders(subfolderPath) {
   fs.chmod(subfolderPath, 0o777, (err) => {
     if (err) throw err;
-    console.log(`Changed permissions of ${subfolderPath} to 777 (Full access))`);
+    console.log(
+      `Changed permissions of ${subfolderPath} to Full Access (Read, Write, Execute).`,
+      '\n'
+    );
   });
 }
 
 // Using the function
-const folderPath = 'C:/Files_To_Sort'; // folder with files to be moved
-const subfolderPath = 'C:/Sorted_Files'; // folder where subfolders will be created (Must exist before running script)
-const subfolderName = 'folder'; // name will be appended with a number: folder-0, folder-1, etc.
+const folderPath = "C:/Files_To_Sort"; // folder with files to be moved
+const subfolderPath = "C:/Sorted_Files"; // folder where subfolders will be created (Must exist before running script)
+const subfolderName = "folder"; // name will be appended with a number: folder-0, folder-1, etc.
 
 // use numSubFolders if you want to create a specific number of subfolders
 // with a calculated number of files per subfolder evenly distributed.
@@ -129,5 +152,10 @@ const numSubfolders = 0; // 0 = disabled
 // with a specific number of files per subfolder.
 const numFilesPerSubfolder = 10; // 0 = disabled
 
-
-moveFilesToSubfolders(folderPath, subfolderPath, subfolderName,  numSubfolders, numFilesPerSubfolder);
+moveFilesToSubfolders(
+  folderPath,
+  subfolderPath,
+  subfolderName,
+  numSubfolders,
+  numFilesPerSubfolder
+);
